@@ -1,9 +1,14 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { X, Moon, Sun, Menu, Play, Settings, Activity, FolderInput, Code2, Zap } from 'lucide-react';
+import { X, Moon, Sun, Menu, Play, Settings, Activity, FolderInput, Code2, Zap, Camera, Download, Files, BookOpen } from 'lucide-react';
+import html2canvas from 'html2canvas';
+import { jsPDF } from 'jspdf';
 import Sidebar from './components/Sidebar';
 import EditorArea from './components/EditorArea';
 import LLMPanel from './components/LLMPanel';
 import SettingsModal from './components/SettingsModal';
+import StudySection from './components/StudySection';
+import LessonViewer from './components/LessonViewer';
+import { getLessonById } from './data/lessons';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { executeABAPSimulation } from './services/llm';
 import type { FileNode } from './types';
@@ -13,10 +18,11 @@ function App() {
   const [fileSystem, setFileSystem] = useState<FileNode[]>([]);
   const [activeFileId, setActiveFileId] = useState<string>('');
   const [openFileIds, setOpenFileIds] = useState<string[]>([]);
-  
   const [theme, setTheme] = useState<'nexus-dark' | 'light'>('nexus-dark');
-  const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(true);
   const [isLLMPanelOpen, setIsLLMPanelOpen] = useState<boolean>(false);
+  const [userLevel] = useState<number>(0);
+  const [activeSidebar, setActiveSidebar] = useState<'files' | 'study' | 'none'>('files');
+  const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(true);
   
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [llmOutput, setLlmOutput] = useState<{ type: 'info' | 'error' | 'success'; message: string; data?: any } | null>(null);
@@ -24,8 +30,6 @@ function App() {
   const [markers, setMarkers] = useState<any[]>([]);
   const [apiKey, setApiKey] = useState<string>(localStorage.getItem('gemini_api_key') || '');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-
-  const [isLayoutReady, setIsLayoutReady] = useState(false);
 
   // File handle map for lazy content loading (stored in ref to avoid re-renders)
   const fileHandleMap = useRef<Map<string, FileSystemFileHandle>>(new Map());
@@ -39,16 +43,13 @@ function App() {
   const lastSavedContentRef = useRef<Map<string, string>>(new Map());
   const [saveStatus, setSaveStatus] = useState<'saved' | 'unsaved' | 'saving...'>('saved');
 
+  const editorCaptureRef = useRef<HTMLDivElement>(null);
+  const [isCapturing, setIsCapturing] = useState(false);
+
   // Sync API Key to Local Storage
   useEffect(() => {
     localStorage.setItem('gemini_api_key', apiKey);
   }, [apiKey]);
-
-  // Protect the editor: Wait until layout is drawn
-  useEffect(() => {
-    const timer = setTimeout(() => setIsLayoutReady(true), 50);
-    return () => clearTimeout(timer);
-  }, []);
 
   // --- Workspace Explorer ---
   const openWorkspace = useCallback(async () => {
@@ -375,25 +376,119 @@ function App() {
     }
   };
 
+  const handleCapture = async () => {
+    if (!editorCaptureRef.current) return;
+    setIsCapturing(true);
+    
+    // Give state time to update and render the watermark
+    setTimeout(async () => {
+      try {
+        const canvas = await html2canvas(editorCaptureRef.current!, {
+          backgroundColor: theme === 'light' ? '#ffffff' : '#1e1e1e',
+          scale: 2,
+          logging: false,
+          useCORS: true
+        });
+        
+        const link = document.createElement('a');
+        link.download = 'nexus-code-snippet.png';
+        link.href = canvas.toDataURL('image/png');
+        link.click();
+      } catch (err) {
+        console.error('Capture failed:', err);
+        alert('Failed to capture code snippet.');
+      } finally {
+        setIsCapturing(false);
+      }
+    }, 150);
+  };
+
+  const handleDownloadCode = () => {
+    if (!activeNode || code === undefined) return;
+    
+    // Initialize a new PDF document
+    const doc = new jsPDF();
+    
+    // Set a monospace font for code readability
+    doc.setFont("courier", "normal");
+    doc.setFontSize(10);
+    
+    // Add a simple header for the file name
+    const fileName = activeNode.name || 'nexus-code';
+    doc.text(`File: ${fileName}`, 10, 10);
+    doc.line(10, 12, 200, 12); // Draw a line under the header
+    
+    // Split the raw code into an array of individual lines
+    const lines = code.split('\n');
+    
+    let y = 20; // Starting Y position for the code
+    const lineHeight = 5; // Height of each line
+    const pageHeight = doc.internal.pageSize.getHeight();
+    
+    // Loop through each line and write it to the PDF, handling pagination
+    lines.forEach((line) => {
+      // If the text reaches the bottom margin, create a new page
+      if (y > pageHeight - 15) {
+        doc.addPage();
+        y = 15; // Reset Y position for the new page
+      }
+      
+      // Prevent long lines from running off the right edge (optional word wrap)
+      // For basic formatting, we'll just truncate or let it run off. 
+      // jsPDF has splitTextToSize if we want strict wrapping.
+      const splitLines = doc.splitTextToSize(line, 190); 
+      
+      splitLines.forEach((splitLine: string) => {
+        if (y > pageHeight - 15) {
+          doc.addPage();
+          y = 15;
+        }
+        doc.text(splitLine, 10, y);
+        y += lineHeight;
+      });
+    });
+    
+    // Trigger the PDF download
+    const pdfName = fileName.replace(/\.[^/.]+$/, "") + '.pdf';
+    doc.save(pdfName);
+  };
+
   return (
     <div className="app-container" style={{ display: 'flex', flexDirection: 'column', height: '100vh', width: '100vw', overflow: 'hidden', background: 'var(--bg-primary)' }}>
-      <header className="glass-panel" style={{ height: 'var(--header-height)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 20px', borderBottom: '1px solid var(--border-color)', zIndex: 10 }}>
+      <header className="glass-panel" style={{ width: '100%', height: 'var(--header-height)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 20px', borderBottom: '1px solid var(--border-color)', zIndex: 10 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-          <button 
-            onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-            style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center' }}
-          >
-            <Menu size={18} />
-          </button>
           <h1 style={{ fontSize: '1.2rem', fontWeight: 600, margin: 0, color: 'var(--accent-color)' }}>Nexus ABAP IDE</h1>
+          <span style={{ 
+            color: '#ffffff', 
+            fontSize: '1.05rem', 
+            fontWeight: 'bold'
+          }}>
+            Level: {userLevel}
+          </span>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <button
-            onClick={() => handleAction('run')}
-            style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '4px 14px', borderRadius: '4px', fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer', border: 'none', background: 'var(--accent-color)', color: 'var(--text-primary)' }}
-          >
-            <Play size={14} fill="currentColor" /> Run
-          </button>
+       <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <>
+              <button
+                onClick={handleDownloadCode}
+                disabled={!activeNode}
+                style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '4px 14px', borderRadius: '4px', fontSize: '0.8rem', fontWeight: 600, cursor: !activeNode ? 'not-allowed' : 'pointer', border: '1px solid var(--border-color)', background: 'transparent', color: 'var(--text-primary)', transition: 'background 0.2s', opacity: !activeNode ? 0.5 : 1 }}
+              >
+                <Download size={14} /> Download 💾
+              </button>
+              <button
+                onClick={handleCapture}
+                disabled={isCapturing}
+                style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '4px 14px', borderRadius: '4px', fontSize: '0.8rem', fontWeight: 600, cursor: isCapturing ? 'wait' : 'pointer', border: '1px solid var(--border-color)', background: 'transparent', color: 'var(--text-primary)', transition: 'background 0.2s' }}
+              >
+                <Camera size={14} /> {isCapturing ? 'Capturing...' : 'Share 📸'}
+              </button>
+              <button
+                onClick={() => handleAction('run')}
+                style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '4px 14px', borderRadius: '4px', fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer', border: 'none', background: 'var(--accent-color)', color: 'var(--text-primary)' }}
+              >
+                <Play size={14} fill="currentColor" /> Run
+              </button>
+            </>
           <button
             onClick={() => setIsSettingsOpen(true)}
             style={{ background: 'transparent', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--text-secondary)', fontSize: '0.8rem' }}
@@ -403,60 +498,162 @@ function App() {
         </div>
       </header>
 
-      <div style={{ display: 'flex', flex: 1, overflow: 'hidden', height: '100%' }}>
+      <div style={{ display: 'flex', flexDirection: 'row', flex: 1, overflow: 'hidden' }}>
+        {/* Activity Bar (Thin Left Sidebar) */}
+        <div style={{ width: '48px', background: 'var(--bg-secondary)', borderRight: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '12px 0', gap: '16px', zIndex: 20 }}>
+          <button 
+            onClick={() => setIsSidebarOpen(prev => !prev)}
+            style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: isSidebarOpen ? 'var(--text-primary)' : 'var(--text-secondary)', transition: 'color 0.2s' }}
+            title="Toggle Sidebar"
+          >
+            <Menu size={22} />
+          </button>
+          
+          <button 
+            onClick={() => setActiveSidebar(prev => prev === 'files' ? 'none' : 'files')}
+            style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: activeSidebar === 'files' ? 'var(--text-primary)' : 'var(--text-secondary)', position: 'relative', display: 'flex', justifyContent: 'center', width: '100%' }}
+            title="Explorer"
+          >
+            <Files size={22} />
+            {activeSidebar === 'files' && <div style={{ position: 'absolute', left: '0px', top: '-4px', bottom: '-4px', width: '2px', background: 'var(--accent-color)' }} />}
+          </button>
+          
+          <button 
+            onClick={() => setActiveSidebar(prev => prev === 'study' ? 'none' : 'study')}
+            style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: activeSidebar === 'study' ? 'var(--text-primary)' : 'var(--text-secondary)', position: 'relative', display: 'flex', justifyContent: 'center', width: '100%' }}
+            title="Study"
+          >
+            <BookOpen size={22} />
+            {activeSidebar === 'study' && <div style={{ position: 'absolute', left: '0px', top: '-4px', bottom: '-4px', width: '2px', background: 'var(--accent-color)' }} />}
+          </button>
+        </div>
+
+        <style>{`
+          .sidebar-panel-container {
+            transition: flex 0.3s ease-in-out, width 0.3s ease-in-out !important;
+          }
+          .sidebar-hidden {
+            flex: 0 0 0px !important;
+            min-width: 0px !important;
+            width: 0px !important;
+            overflow: hidden !important;
+          }
+        `}</style>
+        
         <PanelGroup direction="horizontal" autoSaveId="nexus-ide-layout">
-          {isSidebarOpen && (
-            <Panel id="sidebar" order={1} defaultSize={20} minSize={10} maxSize={50}>
-              <Sidebar 
-                fileSystem={fileSystem} 
-                setFileSystem={setFileSystem} 
-                activeFileId={activeFileId} 
-                setActiveFileId={handleFileOpen}
-                openFileIds={openFileIds}
-                setOpenFileIds={setOpenFileIds}
-                onOpenWorkspace={openWorkspace}
-                onCreateFile={createFileOnDisk}
-                onCreateFolder={createFolderOnDisk}
-              />
+          {activeSidebar !== 'none' && (
+            <Panel 
+              id="sidebar" 
+              order={1} 
+              defaultSize={20} 
+              minSize={15} 
+              maxSize={40}
+              className={`sidebar-panel-container ${!isSidebarOpen ? 'sidebar-hidden' : ''}`}
+            >
+              <div style={{ width: '100%', height: '100%', minWidth: '200px', display: 'flex', flexDirection: 'column' }}>
+                {activeSidebar === 'files' && (
+                  <Sidebar 
+                    fileSystem={fileSystem} 
+                    setFileSystem={setFileSystem} 
+                    activeFileId={activeFileId} 
+                    setActiveFileId={handleFileOpen}
+                    openFileIds={openFileIds}
+                    setOpenFileIds={setOpenFileIds}
+                    onOpenWorkspace={openWorkspace}
+                    onCreateFile={createFileOnDisk}
+                    onCreateFolder={createFolderOnDisk}
+                  />
+                )}
+                {activeSidebar === 'study' && (
+                  <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg-secondary)', borderRight: '1px solid var(--border-color)' }}>
+                    <StudySection userLevel={userLevel} onSelectLesson={(id) => handleFileOpen(id)} />
+                  </div>
+                )}
+              </div>
             </Panel>
           )}
           
-          {isSidebarOpen && <PanelResizeHandle className="resize-handle-horizontal" />}
+          {activeSidebar !== 'none' && (
+            <PanelResizeHandle 
+              className="resize-handle-horizontal" 
+              style={{
+                width: isSidebarOpen ? undefined : '0px',
+                opacity: isSidebarOpen ? 1 : 0,
+                pointerEvents: isSidebarOpen ? 'auto' : 'none',
+                transition: 'opacity 0.3s ease-in-out, width 0.3s ease-in-out'
+              }} 
+            />
+          )}
           
           <Panel id="main-content" order={2}>
             <PanelGroup direction="vertical">
-              <Panel id="editor-panel" order={1} style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-                
-                {/* Editor Header: Tabs and Controls */}
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#1e1e1e', borderBottom: '1px solid var(--border-color)', height: '40px' }}>
-                  
-                  {/* Tabs */}
+              <Panel id="editor-panel" order={1} style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg-primary)' }}>
+                {/* Editor is strictly always rendered */}
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#1e1e1e', borderBottom: '1px solid var(--border-color)', height: '40px' }}>                  {/* Tabs */}
                   <div style={{ display: 'flex', height: '100%', overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
-                    {openFileIds.map(fId => {
-                      const file = fileSystem.find(n => n.id === fId);
-                      if (!file) return null;
-                      const isActive = fId === activeFileId;
+                    {openFileIds.map(tabId => {
+                      const file = fileSystem.find(f => f.id === tabId);
+                      const lesson = getLessonById(tabId);
+                      if (!file && !lesson) return null;
+                      
+                      const isActive = activeFileId === tabId;
+                      const title = file ? file.name : (lesson ? lesson.title : '');
+                      
                       return (
                         <div 
-                          key={fId}
-                          onClick={() => setActiveFileId(fId)}
+                          key={tabId}
+                          onClick={() => handleFileOpen(tabId)}
                           style={{
-                            display: 'flex', alignItems: 'center', gap: '8px', padding: '0 16px', cursor: 'pointer',
-                            background: isActive ? '#1e1e1e' : 'transparent',
-                            color: isActive ? '#ffffff' : '#888',
-                            borderRight: '1px solid #333',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px',
+                            padding: '0 16px',
+                            height: '100%',
+                            background: isActive ? 'var(--bg-primary)' : 'rgba(0,0,0,0.2)',
+                            borderRight: '1px solid var(--border-color)',
                             borderTop: isActive ? '2px solid var(--accent-color)' : '2px solid transparent',
-                            fontSize: '13px'
+                            cursor: 'pointer',
+                            color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)',
+                            minWidth: '120px',
+                            position: 'relative',
+                            userSelect: 'none'
                           }}
                         >
-                          {file.name}
-                          <X 
-                            size={14} 
-                            onClick={(e) => closeTab(e, fId)} 
-                            style={{ opacity: 0.6, cursor: 'pointer' }}
-                            onMouseEnter={(e) => (e.currentTarget.style.opacity = '1')}
-                            onMouseLeave={(e) => (e.currentTarget.style.opacity = '0.6')}
-                          />
+                          <div style={{ display: 'flex', alignItems: 'center', flex: 1, overflow: 'hidden' }}>
+                            <span style={{ 
+                              display: 'inline-block', 
+                              width: '8px', 
+                              height: '8px', 
+                              borderRadius: '50%', 
+                              background: (saveStatus === 'unsaved' && activeFileId === tabId) ? 'var(--accent-color)' : 'transparent',
+                              marginRight: '6px'
+                            }} />
+                            {lesson && <BookOpen size={14} color="var(--accent-color)" style={{ marginRight: '6px' }} />}
+                            <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontSize: '0.85rem' }}>
+                              {title}
+                            </span>
+                          </div>
+                          
+                          <button 
+                            onClick={(e) => closeTab(e, tabId)}
+                            style={{
+                              background: 'transparent',
+                              border: 'none',
+                              color: 'var(--text-secondary)',
+                              cursor: 'pointer',
+                              padding: '4px',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              borderRadius: '4px',
+                              transition: 'background 0.2s',
+                              marginLeft: '8px'
+                            }}
+                            onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'}
+                            onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+                          >
+                            <X size={14} />
+                          </button>
                         </div>
                       );
                     })}
@@ -480,13 +677,30 @@ function App() {
                   </div>
                 </div>
 
-                <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-                  {isLayoutReady && activeNode ? (
-                    <EditorArea code={code} setCode={setCode} markers={markers} theme={theme} />
-                  ) : isLayoutReady && fileSystem.length === 0 ? (
+                <div ref={editorCaptureRef} style={{ flex: 1, display: 'flex', overflow: 'hidden', position: 'relative', background: theme === 'light' ? '#ffffff' : '#1e1e1e' }}>
+                  {activeFileId ? (
+                    (() => {
+                      const activeLesson = getLessonById(activeFileId);
+                      if (activeLesson) {
+                        return <LessonViewer lessonId={activeFileId} />;
+                      }
+                      
+                      const activeFileItem = fileSystem.find(f => f.id === activeFileId);
+                      if (activeFileItem) {
+                        return <EditorArea code={activeFileItem.content || ''} setCode={setCode} markers={markers} theme={theme} />;
+                      }
+                      
+                      return (
+                        <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)' }}>
+                          <Code2 size={64} style={{ opacity: 0.1, marginBottom: '24px' }} />
+                          <p>File or Lesson not found</p>
+                        </div>
+                      );
+                    })()
+                  ) : fileSystem.length === 0 ? (
                     <div style={{
                       flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-                      background: '#1a1a2e', color: '#555', userSelect: 'none', gap: '20px'
+                      background: 'var(--bg-primary)', color: '#555', userSelect: 'none', gap: '20px'
                     }}>
                       <Code2 size={56} strokeWidth={1} style={{ color: 'var(--accent-color)', opacity: 0.35 }} />
                       <div style={{ textAlign: 'center' }}>
@@ -508,7 +722,7 @@ function App() {
                         <FolderInput size={16} /> Open Folder
                       </button>
                     </div>
-                  ) : isLayoutReady && fileSystem.length > 0 ? (
+                  ) : (
                     <div style={{
                       flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
                       background: 'var(--bg-primary)', color: '#888', userSelect: 'none', gap: '16px'
@@ -519,8 +733,14 @@ function App() {
                         <div style={{ fontSize: '0.9rem', color: '#777' }}>Start learning ABAP from here</div>
                       </div>
                     </div>
-                  ) : null}
-                </div>
+                  )}
+                  
+                  {isCapturing && (
+                    <div style={{ position: 'absolute', bottom: '20px', right: '20px', fontSize: '14px', color: theme === 'light' ? 'rgba(0,0,0,0.5)' : 'rgba(255,255,255,0.4)', fontFamily: 'sans-serif', pointerEvents: 'none', zIndex: 100, fontWeight: 500, userSelect: 'none' }}>
+                      Made with Nexus IDE
+                    </div>
+                   )}
+                 </div>
               </Panel>
               
               {isLLMPanelOpen && <PanelResizeHandle className="resize-handle-vertical" />}
